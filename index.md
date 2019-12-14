@@ -1,4 +1,5 @@
 ## Chris's Website
+To contact me, please us christopher.t.hone@gmail.com
 
 Here is a link to [my thesis](./thesis.pdf). It covers some aspects of one dimensional algebraic geometry. It takes the scheme theoretic perspective, and most of the time we aren't over a field, so as to be applicable to number theory/isolate the algebra-geometric aspects from the arithmetic aspects.
 
