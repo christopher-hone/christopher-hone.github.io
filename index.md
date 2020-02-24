@@ -7,7 +7,7 @@ I also gave a colloquium style talk on the Riemann Roch theorem, proving it usin
 
 Here are the lecture notes for the rep theory lectures:
 
-[Semisimple algebras](./semisimple algebras.pdf)
+[Semisimple algebras](./Semisimple algebras.pdf)
 
 [Understanding RepG](./Understanding Rep G.pdf)
 
