@@ -11,6 +11,8 @@ Here are the lecture notes for the rep theory lectures:
 
 [Understanding RepG](./Understanding Rep G.pdf)
 
+[Functors between representation categories](./Functors on RepG.pdf)
+
 Here is the assignment:
 
 [Assignment](./Problems rep final.pdf)
