@@ -13,6 +13,8 @@ Here are the lecture notes for the rep theory lectures:
 
 [Functors between representation categories](./Functors on RepG.pdf)
 
+[First few examples](./Examples1.pdf)
+
 Here is the assignment:
 
 [Assignment](./Problems rep final.pdf)
