@@ -15,6 +15,8 @@ Here are the lecture notes for the rep theory lectures:
 
 [First few examples](./Examples1.pdf)
 
+[Heisenberg group example](./Examples2.pdf)
+
 Here is the assignment:
 
 [Assignment](./Problems rep final.pdf)
