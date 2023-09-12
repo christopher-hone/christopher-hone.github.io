@@ -1,4 +1,4 @@
-## Chris's Website
+## Chris' Website
 
 I'm currently a PhD student at the University of Sydney, under supervision of Geordie Williamson. Interested in geometric representation theory, algberaic geometry, and the representation theory of finite groups.
 
