@@ -1,11 +1,14 @@
 ## Chris's Website
-To contact me, please use christopher.t.hone@gmail.com
 
-Here is a link to [my thesis](./thesis.pdf). It covers some aspects of one dimensional algebraic geometry. It takes the scheme theoretic perspective, and most of the time we aren't over a field, so as to be applicable to number theory/isolate the algebra-geometric aspects from the arithmetic aspects.
+I'm currently a PhD student at the University of Sydney, under supervision of Geordie Williamson. Interested in geometric representation theory, algberaic geometry, and the representation theory of finite groups.
 
-I also gave a colloquium style talk on the Riemann Roch theorem, proving it using the adele ring. Here is a link to [my talk](https://www.youtube.com/watch?v=V86WYcHT9xQ). 
+To contact me, please use christopher.t.hone(at)gmail.com
 
-Here are the lecture notes for the rep theory lectures:
+Geordie and I ran a modular rep theory course Semester 1 2023.
+
+Here is a link to my Honours thesis [my thesis](./thesis.pdf). It covers some aspects of one dimensional algebraic geometry.
+
+Here are the lecture notes for some rep theory lectures I gave at ANU a few years back:
 
 [Semisimple algebras](./Semisimple algebras.pdf)
 
