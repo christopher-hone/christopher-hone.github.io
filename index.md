@@ -9,4 +9,4 @@ Geordie and I ran a modular rep theory course Semester 1 2023. The website can b
 Papers:
 [Geometric extensions](https://arxiv.org/abs/2309.11780), joint with Geordie Williamson.
 
-My honours thesis [my thesis](./thesis.pdf). It covers some aspects of one dimensional algebraic geometry.
+My [Honours thesis](./thesis.pdf). It covers some aspects of one dimensional algebraic geometry.
