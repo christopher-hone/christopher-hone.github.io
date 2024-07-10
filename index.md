@@ -6,7 +6,7 @@ To contact me, please use christopher.t.hone(at)gmail.com
 
 Geordie and I ran a modular rep theory course Semester 1 2023. The website can be be found [here](https://sites.google.com/view/modular-representation-theory/home), as can recordings and notes for most lectures.
  
-Papers:\\
+Papers:\
 
 [Geometric extensions](https://arxiv.org/abs/2309.11780), joint with Geordie Williamson.
 
