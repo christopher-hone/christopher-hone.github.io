@@ -1,6 +1,6 @@
 ## Chris' website
 
-I'm currently a PhD student at the University of Sydney, under supervision of Geordie Williamson. Interested in geometric representation theory, algberaic geometry, and the representation theory of finite groups.
+I'm currently a PhD student at the University of Sydney, under supervision of Geordie Williamson. Interested in geometric representation theory, algebraic geometry, and the representation theory of finite groups.
 
 To contact me, please use christopher.t.hone(at)gmail.com, especially if you want to know why a six functorial diagram commutes!
 
