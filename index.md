@@ -22,7 +22,7 @@ Other stuff:
 
 My PhD [thesis](./PhDThesist.pdf).
 
-The third chapter of my thesis deals with coherence problems in a six functor formalism, introducing a diagrammatic framework for analysing these. The user guide section explains how this works in a model independent way. I have vibe coded a basic website (./Website.html) to do some amount of this automatically.
+The third chapter of my thesis deals with coherence problems in a six functor formalism, introducing a diagrammatic framework for analysing these. The user guide section explains how this works in a model independent way. I have vibe coded a basic [website](./coherence_checker.html) to do some of this automatically.
 
 Geordie Williamson and I ran a modular rep theory course Semester 1 2023. The website can be be found [here](https://sites.google.com/view/modular-representation-theory/home), as can recordings and notes for most lectures.
 
