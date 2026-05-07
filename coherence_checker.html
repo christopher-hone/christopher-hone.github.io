@@ -1,0 +1,1691 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Six Functor Coherence Checker</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,600;0,700;1,700&display=swap" rel="stylesheet">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.development.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.development.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.22.9/babel.min.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #fdfbf4; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel">
+    const { useState, useCallback } = React;
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PARSING
+// ═══════════════════════════════════════════════════════════════════════════
+// Functor syntax:  f_*  f_!  f^*  f^!
+// vtype codes:
+//   ps = push-star  f_*   (blue ↓)
+//   pl = push-shriek f_!  (red  ↓)
+//   pu = pull-star  f^*   (blue ↑)
+//   lu = pull-shriek f^!  (red  ↑)
+
+const TOKEN_RE = /([a-zA-Z][a-zA-Z0-9]*[~'^ˆ̃̂]*'?)([_^][*!])/;
+
+function parseSequence(text) {
+  const VTYPES = { "_*": "ps", "_!": "pl", "^*": "pu", "^!": "lu" };
+  const tokens = [];
+  const re = new RegExp(TOKEN_RE.source, "g");
+  let m;
+  while ((m = re.exec(text)) !== null)
+    tokens.push({ morph: m[1], vtype: VTYPES[m[2]] });
+  return tokens;
+}
+
+function seqKey(tokens) {
+  return tokens.map(t => `${t.morph}${vtypeSuffix(t.vtype)}`).join(" ");
+}
+function vtypeSuffix(vt) {
+  return { ps: "_*", pl: "_!", pu: "^*", lu: "^!" }[vt] ?? "??";
+}
+function seqTeX(tokens) {
+  if (!tokens || tokens.length === 0) return "\\mathrm{Id}";
+  return tokens.map(t =>
+    ["ps","pl"].includes(t.vtype)
+      ? `${t.morph}_{${vtypeSuffix(t.vtype).slice(1)}}`
+      : `${t.morph}^{${vtypeSuffix(t.vtype).slice(1)}}`
+  ).join(" \\circ ");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// GENERATOR INFERENCE — RIGOROUS
+//
+// All generators are taken directly from the thesis (Def 3.3.2, Def 3.3.4,
+// Def 3.3.6, and the summary on pp.80–81).
+//
+// UNITS AND COUNITS (Def 3.3.2, SF1: f^* ⊣ f_*  and  f_! ⊣ f^!)
+//   Counits (two tokens → Id):
+//     f^* f_* → Id   (pu then ps, same morph)
+//     f_! f^! → Id   (pl then lu, same morph)
+//   Units (Id → two tokens):
+//     Id → f_* f^*   (ps then pu inserted, same morph)
+//     Id → f^! f_!   (lu then pl inserted, same morph)
+//
+// COLOUR CHANGES (Def 3.3.4, p.81):
+//   f_! → f_*   always available (non-invertible in general)
+//   f_* → f_!   requires f proper (inverse of cp)
+//   j^! → j^*   requires j open immersion (τ_j isomorphism)
+//   j^* → j^!   requires j open immersion (inverse of τ_j)
+//
+// CROSSINGS (Def 3.3.6, pp.80-81):
+//   For matching purposes, what matters is which position-index pair swaps.
+//   The specific crossing type (mono/multi, base change/composition iso)
+//   is inferred from the functor types involved.
+//   All crossings between two functors with DIFFERENT morphism names are valid
+//   in the pullback cube.  Same-morph adjacent tokens can only be crossed if
+//   they come from a factorised square — we allow this as it arises in the cube.
+//
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Valid counit pairs: (left vtype, right vtype)
+// f^* f_* → Id  and  f_! f^! → Id
+const VALID_COUNITS = new Set(["pu:ps", "pl:lu"]);
+// Valid unit pairs: (left vtype, right vtype) of the INSERTED tokens
+// Id → f_* f^*  and  Id → f^! f_!
+const VALID_UNITS   = new Set(["ps:pu", "lu:pl"]);
+
+function findCounits(seqA, seqB) {
+  if (seqB.length !== seqA.length - 2) return [];
+  const results = [];
+  for (let i = 0; i < seqA.length - 1; i++) {
+    const a = seqA[i], b = seqA[i + 1];
+    const key = `${a.vtype}:${b.vtype}`;
+    if (a.morph === b.morph && VALID_COUNITS.has(key)) {
+      const candidate = [...seqA.slice(0, i), ...seqA.slice(i + 2)];
+      if (seqKey(candidate) === seqKey(seqB)) {
+        const symbol = a.vtype === "pu" ? "ε*" : "ε!";
+        // Build a context string showing the sequence with the consumed pair bracketed
+        const left  = seqA.slice(0, i).map(t => seqKey([t])).join(" ");
+        const right = seqA.slice(i + 2).map(t => seqKey([t])).join(" ");
+        const consumed = `[${seqKey([a])} ${seqKey([b])}]`;
+        const context = [left, consumed, right].filter(Boolean).join(" ");
+        results.push({
+          pos: i,
+          desc: `${symbol}(${a.morph}) at positions ${i}–${i+1}: ${context}`,
+          label: `ε(${a.morph})`,
+          kind: "counit",
+          assumption: null,
+        });
+      }
+    }
+  }
+  return results;
+}
+
+function findUnits(seqA, seqB) {
+  if (seqB.length !== seqA.length + 2) return [];
+  const results = [];
+  for (let i = 0; i <= seqA.length; i++) {
+    if (seqKey(seqB.slice(0, i)) !== seqKey(seqA.slice(0, i))) continue;
+    if (seqKey(seqB.slice(i + 2)) !== seqKey(seqA.slice(i))) continue;
+    const [x, y] = seqB.slice(i, i + 2);
+    if (!x || !y) continue;
+    const key = `${x.vtype}:${y.vtype}`;
+    if (x.morph === y.morph && VALID_UNITS.has(key)) {
+      const symbol = x.vtype === "ps" ? "η*" : "η!";
+      // Build context string showing where the pair is inserted
+      const left    = seqA.slice(0, i).map(t => seqKey([t])).join(" ");
+      const right   = seqA.slice(i).map(t => seqKey([t])).join(" ");
+      const inserted = `[${seqKey([x])} ${seqKey([y])}]`;
+      const contextParts = [];
+      if (left)  contextParts.push(left);
+      contextParts.push(inserted);
+      if (right) contextParts.push(right);
+      const context = contextParts.join(" ");
+      results.push({
+        pos: i,
+        desc: `${symbol}(${x.morph}) at position ${i}: ${context}`,
+        label: `η(${x.morph})`,
+        kind: "unit",
+        inserted: [x, y],
+        assumption: null,
+      });
+    }
+  }
+  return results;
+}
+
+// Colour changes: exactly one token differs, same morph, and the direction is valid.
+// Returns [] or [{pos, desc, label, kind, assumption}]
+function findColourChanges(seqA, seqB) {
+  if (seqA.length !== seqB.length) return [];
+  let diffs = 0, pos = -1;
+  for (let i = 0; i < seqA.length; i++) {
+    if (seqA[i].morph !== seqB[i].morph || seqA[i].vtype !== seqB[i].vtype) { diffs++; pos = i; }
+  }
+  if (diffs !== 1) return [];
+  const a = seqA[pos], b = seqB[pos];
+  if (a.morph !== b.morph) return [];
+
+  // Valid colour changes (Def 3.3.4 + p.81):
+  //   pl → ps  (f_! → f_*)  always valid; f proper for inverse
+  //   ps → pl  (f_* → f_!)  requires f proper
+  //   lu → pu  (f^! → f^*)  requires j open immersion
+  //   pu → lu  (f^* → f^!)  requires j open immersion
+  const COLOUR_CHANGE_RULES = {
+    "pl:ps": { label: `c(${a.morph})`, desc: `${a.morph}_! → ${a.morph}_*`, assumption: null },
+    "ps:pl": { label: `c⁻¹(${a.morph})`, desc: `${a.morph}_* → ${a.morph}_!`, assumption: `${a.morph} is proper` },
+    "lu:pu": { label: `τ(${a.morph})`, desc: `${a.morph}^! → ${a.morph}^*`, assumption: `${a.morph} is an open immersion` },
+    "pu:lu": { label: `τ⁻¹(${a.morph})`, desc: `${a.morph}^* → ${a.morph}^!`, assumption: `${a.morph} is an open immersion` },
+  };
+  const key = `${a.vtype}:${b.vtype}`;
+  const rule = COLOUR_CHANGE_RULES[key];
+  if (!rule) return [];
+  return [{ pos, desc: `colour change: ${rule.desc}`, label: rule.label, kind: "colour_change", assumption: rule.assumption }];
+}
+
+// Crossings: some adjacent pair swapped.
+// We annotate what kind of crossing it is based on functor types.
+function crossingAssumption(a, b) {
+  // Mono crossings (same colour group: both * or both !): always valid in pullback cube
+  const aIsBlue = (a.vtype === "ps" || a.vtype === "pu");
+  const bIsBlue = (b.vtype === "ps" || b.vtype === "pu");
+  if (aIsBlue === bIsBlue) return null; // mono crossing, no extra assumption
+  // Multi (! - *) crossings: the formal inverse crossings require properness or open imm.
+  // Base change maps always exist; formal inverses need one strand proper or open imm.
+  // We note this as a conditional assumption.
+  return `one of ${a.morph}, ${b.morph} is proper or an open immersion (if using a formal inverse crossing)`;
+}
+
+function crossingLabel(a, b) {
+  const aIsBlue = (a.vtype === "ps" || a.vtype === "pu");
+  const bIsBlue = (b.vtype === "ps" || b.vtype === "pu");
+  return aIsBlue === bIsBlue ? `×` : `×̃`; // ~ for multicoloured
+}
+
+function findCrossings(seqA, seqB) {
+  if (seqA.length !== seqB.length) return [];
+  const results = [];
+  for (let i = 0; i < seqA.length - 1; i++) {
+    const swapped = [...seqA];
+    [swapped[i], swapped[i + 1]] = [swapped[i + 1], swapped[i]];
+    if (seqKey(swapped) === seqKey(seqB)) {
+      const a = seqA[i], b = seqA[i + 1];
+      results.push({
+        pos: i,
+        desc: `crossing: ${seqKey([a])} ↔ ${seqKey([b])}`,
+        label: crossingLabel(a, b),
+        kind: "crossing",
+        assumption: crossingAssumption(a, b),
+      });
+    }
+  }
+  return results;
+}
+
+function inferGenerator(seqA, seqB) {
+  const diff = seqB.length - seqA.length;
+  let options = [];
+  if (diff === -2) {
+    options = findCounits(seqA, seqB);
+    if (options.length === 0)
+      return { options: [], ambiguous: false, error: "No valid counit found. Note: f_* f^* → Id does not exist; the valid counits are f^* f_* → Id and f_! f^! → Id (Def 3.3.2)." };
+  } else if (diff === 2) {
+    options = findUnits(seqA, seqB);
+    if (options.length === 0)
+      return { options: [], ambiguous: false, error: "No valid unit found. The valid units are Id → f_* f^* and Id → f^! f_! (Def 3.3.2)." };
+  } else if (diff === 0) {
+    options = [...findCrossings(seqA, seqB), ...findColourChanges(seqA, seqB)];
+    if (options.length === 0) {
+      if (seqKey(seqA) === seqKey(seqB))
+        options = [{ kind: "identity", desc: "identity (no change)", label: "id", assumption: null }];
+      else
+        return { options: [], ambiguous: false, error: "No single generator found. Sequences have the same length but differ by more than one adjacent swap or one colour change." };
+    }
+  } else {
+    return { options: [], ambiguous: false, error: `Length changed by ${diff > 0 ? "+" : ""}${diff}. Each step must change length by 0 or ±2 (one unit/counit per step).` };
+  }
+  return { options, ambiguous: options.length > 1 };
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// MATCHING COMPUTATION
+// ═══════════════════════════════════════════════════════════════════════════
+
+function computePathMatching(steps) {
+  if (!steps || steps.length === 0) return null;
+  const firstSeq = steps[0].seqBefore;
+  const n = firstSeq.length;
+  let active = firstSeq.map((_, i) => `d${i}`);
+  let capN = 0;
+  const pairs = [];
+  // bubbles: closed loops — a counit consuming two cap-born strands (Def 3.3.12, Thm 3.3.13)
+  const bubbles = [];
+  const isDomain = id => id.startsWith("d");
+
+  steps.forEach((step, stepIndex) => {
+    const { kind, pos } = step;
+    if (kind === "counit") {
+      if (pos == null || pos < 0 || pos + 1 >= active.length) return;
+      const leftId  = active[pos];
+      const rightId = active[pos + 1];
+      if (!isDomain(leftId) && !isDomain(rightId)) {
+        bubbles.push({ stepIndex, leftId, rightId });
+      }
+      pairs.push({ leftId, rightId, kind: "counit" });
+      active.splice(pos, 2);
+    } else if (kind === "unit") {
+      const p = Math.min(Math.max(pos ?? 0, 0), active.length);
+      const a = `cap${capN}a`, b = `cap${capN}b`;
+      capN++;
+      pairs.push({ leftId: a, rightId: b, kind: "unit" });
+      active.splice(p, 0, a, b);
+    } else if (kind === "crossing") {
+      if (pos != null && pos >= 0 && pos + 1 < active.length)
+        [active[pos], active[pos + 1]] = [active[pos + 1], active[pos]];
+    }
+  });
+
+  const matching = firstSeq.map((_, i) => active.indexOf(`d${i}`));
+  return { n, codN: active.length, matching, active, pairs, bubbles };
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// COLLECT ASSUMPTIONS
+// ═══════════════════════════════════════════════════════════════════════════
+
+function collectAssumptions(steps) {
+  const seen = new Set();
+  const result = [];
+  for (const s of steps) {
+    if (!s.generator?.assumption) continue;
+    const a = s.generator.assumption;
+    if (!seen.has(a)) { seen.add(a); result.push({ text: a, gen: s.generator }); }
+  }
+  return result;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// TIKZ
+// ═══════════════════════════════════════════════════════════════════════════
+
+function makeTikZRow(pathSteps, pathLabel) {
+  if (!pathSteps || pathSteps.length === 0) return `  ? \\arrow[r, "${pathLabel}"] & ?`;
+  const keep = new Set([0, pathSteps.length - 1]);
+  for (let i = 0; i < pathSteps.length; i++) {
+    const g = pathSteps[i].generator;
+    if (g && (g.kind === "unit" || g.kind === "counit")) { keep.add(i); keep.add(i + 1); }
+  }
+  const indices = [...keep].sort((a, b) => a - b);
+  if (indices.length <= 2) {
+    const src = seqTeX(pathSteps[0].seqBefore);
+    const tgt = seqTeX(pathSteps[pathSteps.length - 1].seqBefore);
+    return `  ${src} \\arrow[r, "${pathLabel}"] & ${tgt}`;
+  }
+  return indices.map((idx, ni) => {
+    const label = seqTeX(pathSteps[idx]?.seqBefore);
+    if (ni === indices.length - 1) return `  ${label}`;
+    const gensBetween = pathSteps.slice(idx, indices[ni + 1])
+      .map(s => s.generator?.label || "").filter(Boolean).join(",");
+    return `  ${label} \\arrow[r, "${gensBetween}"]`;
+  }).join(" &\n");
+}
+
+function buildFullTikZ(stepsA, stepsB) {
+  return `% Six Functor Coherence — generated proof
+% Requires \\usepackage{tikz-cd}
+\\[
+\\begin{tikzcd}[column sep=3em, row sep=2.5em]
+${makeTikZRow(stepsA, "\\alpha")} \\\\
+${makeTikZRow(stepsB, "\\beta")}
+\\end{tikzcd}
+\\]
+% By Corollary 3.3.17 / Theorem 3.3.13: \\alpha = \\beta.`;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// STYLES
+// ═══════════════════════════════════════════════════════════════════════════
+
+const C = {
+  bg: "#fdfbf4", paper: "#f7f3e9", ink: "#1b1a17", faint: "#e4ddc8",
+  blue: "#1c3d8f", blueLt: "#dbeafe", red: "#7f1d1d", redLt: "#fee2e2",
+  gold: "#854d0e", goldLt: "#fef9c3", green: "#14532d", greenLt: "#dcfce7",
+  muted: "#6b6456", orange: "#9a3412", orangeLt: "#ffedd5",
+  serif: "'Playfair Display', Georgia, serif",
+  mono:  "'STIX Two Text', 'Times New Roman', serif",
+  code:  "'Fira Mono', 'Courier New', monospace",
+};
+
+const mkBtn = (bg, fg = "#fff", extra = {}) => ({
+  fontFamily: C.serif, fontSize: 12, letterSpacing: "0.05em",
+  padding: "4px 12px", background: bg, color: fg,
+  border: "none", borderRadius: 4, cursor: "pointer", ...extra,
+});
+const mkBtnLg = bg => ({ ...mkBtn(bg), fontSize: 13, padding: "8px 20px", textTransform: "uppercase", letterSpacing: "0.08em" });
+
+// ─── Inline reveal button (not a disclosure triangle — looks like a chip) ────
+function RevealBtn({ label, badge, badgeColor = C.muted, children }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div style={{ marginTop: 8 }}>
+      <button
+        onClick={() => setOpen(o => !o)}
+        style={{
+          display: "inline-flex", alignItems: "center", gap: 6,
+          background: open ? C.paper : "#fff",
+          border: `1px solid ${C.faint}`,
+          borderRadius: 20, padding: "3px 12px",
+          fontFamily: C.serif, fontSize: 11, color: C.muted,
+          cursor: "pointer", letterSpacing: "0.04em",
+          transition: "background 0.15s",
+        }}
+      >
+        <span style={{ fontSize: 8, transform: open ? "rotate(90deg)" : "none", display: "inline-block", transition: "transform 0.15s" }}>▶</span>
+        {label}
+        {badge != null && (
+          <span style={{
+            background: badgeColor, color: "#fff",
+            borderRadius: 10, fontSize: 10, padding: "0 5px",
+            fontFamily: C.serif, lineHeight: "14px",
+          }}>{badge}</span>
+        )}
+      </button>
+      {open && <div style={{ marginTop: 8 }}>{children}</div>}
+    </div>
+  );
+}
+
+// ─── Sequence display ──────────────────────────────────────────────────────
+function SeqDisplay({ tokens }) {
+  if (!tokens || tokens.length === 0)
+    return <span style={{ color: C.muted, fontStyle: "italic", fontSize: 12 }}>Id</span>;
+  return (
+    <span style={{ fontFamily: C.mono, fontSize: 13 }}>
+      {tokens.map((t, i) => {
+        const isBlue = t.vtype === "ps" || t.vtype === "pu";
+        const isPush = t.vtype === "ps" || t.vtype === "pl";
+        const sfx = vtypeSuffix(t.vtype).slice(1);
+        return (
+          <span key={i}>
+            {i > 0 && <span style={{ color: C.muted, fontSize: 10, margin: "0 3px" }}>·</span>}
+            <span style={{ color: isBlue ? C.blue : C.red }}>
+              {t.morph}
+              {isPush ? <sub style={{ fontSize: "0.72em" }}>{sfx}</sub> : <sup style={{ fontSize: "0.72em" }}>{sfx}</sup>}
+            </span>
+            <span style={{ color: C.muted, fontSize: "0.65em", marginLeft: 1 }}>{isPush ? "↓" : "↑"}</span>
+          </span>
+        );
+      })}
+    </span>
+  );
+}
+
+// ─── Matching diagram ──────────────────────────────────────────────────────
+function MatchingDiagram({ match, color, label }) {
+  if (!match) return null;
+  const { n, codN, matching, pairs, active } = match;
+  if (n === 0 && codN === 0) return <div style={{ color: C.muted, fontSize: 12 }}>Empty</div>;
+  const total = Math.max(n, codN, 1);
+  const W = Math.max(total * 48 + 40, 100);
+  const H = 120;
+  const domY = H - 24, codY = 24;
+  const xD = i => 20 + (n > 1 ? i * (W - 40) / (n - 1) : (W - 40) / 2);
+  const xC = i => 20 + (codN > 1 ? i * (W - 40) / (codN - 1) : (W - 40) / 2);
+  const codIdxOf = id => active.indexOf(id);
+  return (
+    <div>
+      <div style={{ fontSize: 10, fontFamily: C.serif, letterSpacing: "0.1em", textTransform: "uppercase", color: C.muted, marginBottom: 4 }}>{label}</div>
+      <svg width={W} height={H} style={{ display: "block", overflow: "visible" }}>
+        {Array.from({ length: n }).map((_, i) => (
+          <g key={"d" + i}>
+            <circle cx={xD(i)} cy={domY} r={5} fill={color} opacity={0.85} />
+            <text x={xD(i)} y={domY + 15} textAnchor="middle" fontSize={9} fontFamily={C.mono} fill={C.muted}>d{i}</text>
+          </g>
+        ))}
+        {Array.from({ length: codN }).map((_, i) => (
+          <g key={"c" + i}>
+            <circle cx={xC(i)} cy={codY} r={5} fill={color} opacity={0.85} />
+            <text x={xC(i)} y={codY - 10} textAnchor="middle" fontSize={9} fontFamily={C.mono} fill={C.muted}>c{i}</text>
+          </g>
+        ))}
+        {matching.map((ci, di) => ci >= 0 ? (
+          <line key={"s" + di} x1={xD(di)} y1={domY - 6} x2={xC(ci)} y2={codY + 6}
+            stroke={color} strokeWidth={1.8} opacity={0.5} />
+        ) : null)}
+        {/* Counit arcs: cup shape at bottom between two domain dots */}
+        {pairs.filter(p => p.kind === "counit").map((p, i) => {
+          const da = parseInt(p.leftId.replace("d", ""));
+          const db = parseInt(p.rightId.replace("d", ""));
+          if (isNaN(da) || isNaN(db)) return null;
+          const x1 = xD(da), x2 = xD(db), cy2 = domY - 30;
+          return (
+            <g key={"counit" + i}>
+              <path d={`M${x1},${domY - 6} C${x1},${cy2} ${x2},${cy2} ${x2},${domY - 6}`}
+                fill="none" stroke={C.gold} strokeWidth={1.6} strokeDasharray="3,2" />
+              <text x={(x1 + x2) / 2} y={cy2 - 4} textAnchor="middle" fontSize={8} fontFamily={C.mono} fill={C.gold}>ε</text>
+            </g>
+          );
+        })}
+        {/* Unit arcs: cap shape at top between two codomain dots */}
+        {pairs.filter(p => p.kind === "unit").map((p, i) => {
+          const ci1 = codIdxOf(p.leftId);
+          const ci2 = codIdxOf(p.rightId);
+          if (ci1 < 0 || ci2 < 0) return null;
+          const x1 = xC(ci1), x2 = xC(ci2), cy2 = codY + 30;
+          return (
+            <g key={"unit" + i}>
+              <path d={`M${x1},${codY + 6} C${x1},${cy2} ${x2},${cy2} ${x2},${codY + 6}`}
+                fill="none" stroke={C.gold} strokeWidth={1.6} strokeDasharray="3,2" />
+              <text x={(x1 + x2) / 2} y={cy2 + 11} textAnchor="middle" fontSize={8} fontFamily={C.mono} fill={C.gold}>η</text>
+            </g>
+          );
+        })}
+      </svg>
+    </div>
+  );
+}
+
+// ─── Copy box ─────────────────────────────────────────────────────────────
+function CopyBox({ text }) {
+  const [ok, setOk] = useState(false);
+  const copy = () => { navigator.clipboard.writeText(text).then(() => { setOk(true); setTimeout(() => setOk(false), 1600); }); };
+  return (
+    <div style={{ position: "relative", marginTop: 8 }}>
+      <pre style={{
+        background: "#1a1a1a", color: "#d4cfbf", fontFamily: C.code, fontSize: 11,
+        borderRadius: 6, padding: "12px 48px 12px 14px",
+        overflowX: "auto", whiteSpace: "pre-wrap", wordBreak: "break-all", margin: 0, lineHeight: 1.6,
+      }}>{text}</pre>
+      <button onClick={copy} style={{ position: "absolute", top: 8, right: 8, ...mkBtn(ok ? C.green : "#555") }}>
+        {ok ? "Copied ✓" : "Copy"}
+      </button>
+    </div>
+  );
+}
+
+// ─── Section ──────────────────────────────────────────────────────────────
+function Sec({ num, title, children, accent }) {
+  return (
+    <div style={{ marginBottom: 28 }}>
+      <div style={{ display: "flex", alignItems: "baseline", gap: 8, paddingBottom: 8, marginBottom: 16, borderBottom: `1.5px solid ${accent || C.faint}` }}>
+        <span style={{ fontFamily: C.serif, fontSize: 10, color: C.muted, letterSpacing: "0.14em", textTransform: "uppercase" }}>§{num}</span>
+        <span style={{ fontFamily: C.serif, fontSize: 15, fontWeight: 700, color: C.ink }}>{title}</span>
+      </div>
+      {children}
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PATH EDITOR
+// ═══════════════════════════════════════════════════════════════════════════
+
+const PLACEHOLDER = `f_* g^* g_*\nf_*\ng^* f_*`;
+
+function PathEditor({ onChange, initialText = "" }) {
+  const [text, setText] = useState(initialText);
+  const [steps, setSteps] = useState([]);
+  const [parseError, setParseError] = useState("");
+
+  // Parse initial text on mount if provided
+  const parseAndInfer = useCallback((raw) => {
+    const lines = raw.split(/\n|→|->/).map(s => s.trim()).filter(Boolean);
+    if (lines.length === 0) { setSteps([]); onChange([]); return; }
+    const seqs = lines.map(l => parseSequence(l));
+    const badIdx = seqs.findIndex((s, i) => s.length === 0 && lines[i].trim() !== "");
+    if (badIdx >= 0) {
+      setParseError(`Line ${badIdx + 1} could not be parsed. Check syntax: e.g. f_*  g^!  j_*`);
+      setSteps([]); onChange([]); return;
+    }
+    setParseError("");
+    const newSteps = seqs.slice(0, -1).map((seqA, i) => {
+      const seqB = seqs[i + 1];
+      const { options, ambiguous, error } = inferGenerator(seqA, seqB);
+      return {
+        seqBefore: seqA,
+        options,
+        ambiguous,
+        error: error || null,
+        chosen: (!ambiguous && options.length === 1) ? options[0] : null,
+      };
+    });
+    newSteps.push({ seqBefore: seqs[seqs.length - 1], options: [], ambiguous: false, chosen: null });
+    setSteps(newSteps);
+    const resolved = newSteps.every(s => s.options.length === 0 || s.chosen !== null || s.error);
+    onChange(resolved ? newSteps.map(s => ({ seqBefore: s.seqBefore, generator: s.chosen })) : []);
+  }, [onChange]);
+
+  // Run inference on initialText when an example is loaded (key-based remount + initialText change)
+  React.useEffect(() => { if (initialText) { setText(initialText); parseAndInfer(initialText); } }, [initialText]);
+
+  const handleText = raw => { setText(raw); parseAndInfer(raw); };
+
+  const choose = (stepIdx, option) => {
+    setSteps(prev => {
+      const updated = prev.map((s, i) => i === stepIdx ? { ...s, chosen: option, ambiguous: false } : s);
+      const resolved = updated.every(s => s.options.length === 0 || s.chosen !== null || s.error);
+      if (resolved) onChange(updated.map(s => ({ seqBefore: s.seqBefore, generator: s.chosen })));
+      return updated;
+    });
+  };
+
+  const allGood   = steps.length > 0 && steps.every(s => !s.error && (!s.ambiguous || s.chosen));
+  const hasErrors = steps.some(s => s.error);
+  const ambiguous = steps.filter(s => s.ambiguous && !s.chosen);
+
+  // Border colour signals status
+  const borderColor = hasErrors ? C.red : ambiguous.length > 0 ? C.gold : allGood && steps.length > 0 ? C.green : C.faint;
+
+  return (
+    <div>
+      <div style={{ fontSize: 11, color: C.muted, fontFamily: C.serif, marginBottom: 6, lineHeight: 1.5 }}>
+        One functor sequence per line. Each line is connected to the next by an inferred generator.
+        Syntax: <code style={{ fontFamily: C.code, fontSize: 10 }}>f_*</code>&nbsp;
+        <code style={{ fontFamily: C.code, fontSize: 10 }}>g_!</code>&nbsp;
+        <code style={{ fontFamily: C.code, fontSize: 10 }}>f^*</code>&nbsp;
+        <code style={{ fontFamily: C.code, fontSize: 10 }}>j^!</code>
+      </div>
+
+      <textarea
+        value={text}
+        onChange={e => handleText(e.target.value)}
+        placeholder={PLACEHOLDER}
+        rows={Math.max(3, (text.match(/\n/g) || []).length + 2)}
+        style={{
+          width: "100%", boxSizing: "border-box",
+          fontFamily: C.mono, fontSize: 13, background: "#fff", color: C.ink,
+          border: `1.5px solid ${borderColor}`,
+          borderRadius: 6, padding: "10px 12px",
+          resize: "vertical", outline: "none", lineHeight: 1.6,
+        }}
+        spellCheck={false}
+      />
+
+      {parseError && <div style={{ fontSize: 12, color: C.red, marginTop: 4, fontFamily: C.serif }}>{parseError}</div>}
+
+      {/* Hard errors on specific steps */}
+      {hasErrors && steps.slice(0, -1).map((step, i) => !step.error ? null : (
+        <div key={i} style={{ fontSize: 12, color: C.red, fontFamily: C.serif, marginTop: 3 }}>
+          Step {i + 1}→{i + 2}: {step.error}
+        </div>
+      ))}
+
+      {/* Ambiguity: ALWAYS surfaces immediately (open by default) */}
+      {ambiguous.length > 0 && (
+        <div style={{ marginTop: 10, background: C.goldLt, border: `1px solid ${C.gold}50`, borderRadius: 6, padding: "10px 12px" }}>
+          <div style={{ fontSize: 12, color: C.gold, fontFamily: C.serif, fontWeight: 600, marginBottom: 8 }}>
+            Ambiguous step{ambiguous.length > 1 ? "s" : ""} — multiple valid placements found. Choose one:
+          </div>
+          {steps.slice(0, -1).map((step, i) => {
+            if (!step.ambiguous || step.chosen) return null;
+            const next = steps[i + 1];
+            return (
+              <div key={i} style={{ marginBottom: 10 }}>
+                <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6, marginBottom: 10 }}>
+                  <SeqDisplay tokens={step.seqBefore} />
+                  <span style={{ color: C.muted }}>→</span>
+                  <SeqDisplay tokens={next?.seqBefore} />
+                </div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                  {step.options.map((opt, oi) => {
+                    // Render the sequence with the consumed/inserted pair highlighted inline
+                    const seq = step.seqBefore;
+                    const isCounit = opt.kind === "counit";
+                    const isUnit   = opt.kind === "unit";
+                    const pos = opt.pos ?? 0;
+                    return (
+                      <button
+                        key={oi}
+                        onClick={() => choose(i, opt)}
+                        style={{
+                          display: "flex", alignItems: "center", flexWrap: "wrap", gap: 4,
+                          background: "#fff", border: `1.5px solid ${C.gold}`,
+                          borderRadius: 6, padding: "6px 10px",
+                          cursor: "pointer", textAlign: "left",
+                          fontFamily: C.mono, fontSize: 13,
+                        }}
+                      >
+                        {/* Left context */}
+                        {seq.slice(0, pos).map((t, ti) => {
+                          const isBlue = t.vtype === "ps" || t.vtype === "pu";
+                          const isPush = t.vtype === "ps" || t.vtype === "pl";
+                          return (
+                            <span key={ti} style={{ color: isBlue ? C.blue : C.red, opacity: 0.45 }}>
+                              {ti > 0 && <span style={{ color: C.muted, fontSize: 10, margin: "0 2px" }}>·</span>}
+                              {t.morph}
+                              {isPush ? <sub style={{ fontSize: "0.72em" }}>{vtypeSuffix(t.vtype).slice(1)}</sub>
+                                      : <sup style={{ fontSize: "0.72em" }}>{vtypeSuffix(t.vtype).slice(1)}</sup>}
+                            </span>
+                          );
+                        })}
+                        {/* The highlighted consumed/inserted tokens */}
+                        <span style={{
+                          display: "inline-flex", alignItems: "center", gap: 3,
+                          background: C.goldLt, border: `1.5px solid ${C.gold}`,
+                          borderRadius: 4, padding: "1px 6px",
+                          color: C.gold, fontWeight: 600,
+                        }}>
+                          {isCounit && (
+                            <>
+                              <SeqDisplay tokens={[seq[pos], seq[pos + 1]]} />
+                              <span style={{ fontSize: 10, color: C.gold, marginLeft: 4 }}>→ Id</span>
+                            </>
+                          )}
+                          {isUnit && opt.inserted && (
+                            <>
+                              <span style={{ fontSize: 10, color: C.gold, marginRight: 4 }}>Id →</span>
+                              <SeqDisplay tokens={opt.inserted} />
+                            </>
+                          )}
+                        </span>
+                        {/* Right context */}
+                        {(isCounit ? seq.slice(pos + 2) : seq.slice(pos)).map((t, ti) => {
+                          const isBlue = t.vtype === "ps" || t.vtype === "pu";
+                          const isPush = t.vtype === "ps" || t.vtype === "pl";
+                          return (
+                            <span key={ti} style={{ color: isBlue ? C.blue : C.red, opacity: 0.45 }}>
+                              <span style={{ color: C.muted, fontSize: 10, margin: "0 2px" }}>·</span>
+                              {t.morph}
+                              {isPush ? <sub style={{ fontSize: "0.72em" }}>{vtypeSuffix(t.vtype).slice(1)}</sub>
+                                      : <sup style={{ fontSize: "0.72em" }}>{vtypeSuffix(t.vtype).slice(1)}</sup>}
+                            </span>
+                          );
+                        })}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* Inferred steps — button to reveal */}
+      {allGood && steps.length > 1 && (
+        <RevealBtn label="Show inferred generators">
+          <div style={{ background: C.paper, border: `1px solid ${C.faint}`, borderRadius: 6, padding: "10px 12px" }}>
+            {steps.slice(0, -1).map((step, i) => {
+              const next = steps[i + 1];
+              const g = step.chosen;
+              const col = g?.kind === "unit" || g?.kind === "counit" ? C.gold
+                        : g?.kind === "colour_change" ? C.orange : C.muted;
+              return (
+                <div key={i} style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6, marginBottom: i < steps.length - 2 ? 6 : 0, fontSize: 12 }}>
+                  <SeqDisplay tokens={step.seqBefore} />
+                  <span style={{ color: col, fontFamily: C.mono, fontSize: 11, padding: "0 4px" }}>
+                    —{g?.label || "?"}→
+                  </span>
+                  <SeqDisplay tokens={next?.seqBefore} />
+                </div>
+              );
+            })}
+          </div>
+        </RevealBtn>
+      )}
+    </div>
+  );
+}
+
+// ─── Assumptions panel ────────────────────────────────────────────────────
+function AssumptionsPanel({ stepsA, stepsB }) {
+  const seen = new Set();
+  const all = [];
+  for (const s of [...stepsA, ...stepsB]) {
+    if (!s.generator?.assumption) continue;
+    const a = s.generator.assumption;
+    if (!seen.has(a)) { seen.add(a); all.push({ text: a, gen: s.generator }); }
+  }
+  return (
+    <RevealBtn
+      label={all.length === 0 ? "Assumptions on morphisms" : "Assumptions on morphisms"}
+      badge={all.length > 0 ? all.length : null}
+      badgeColor={C.orange}
+    >
+      {all.length === 0 ? (
+        <div style={{ fontSize: 12, color: C.muted, fontFamily: C.serif, fontStyle: "italic", padding: "6px 0" }}>
+          No additional assumptions needed beyond the pullback cube structure. All generators used are standard base change or composition isomorphisms (valid in any admissible diagram, Def 3.4.2).
+        </div>
+      ) : (
+        <div style={{ background: C.orangeLt, border: `1px solid ${C.orange}30`, borderRadius: 6, padding: "10px 14px" }}>
+          <div style={{ fontSize: 11, color: C.orange, fontFamily: C.serif, marginBottom: 8 }}>
+            The following conditions are required by the generators used (see Def 3.3.4, §3.4.2):
+          </div>
+          {all.map((a, i) => (
+            <div key={i} style={{ display: "flex", gap: 8, alignItems: "baseline", marginBottom: 5 }}>
+              <span style={{ color: C.orange, fontFamily: C.mono, fontSize: 11 }}>·</span>
+              <span style={{ fontSize: 12, fontFamily: C.serif, color: C.ink }}>
+                <strong>{a.text}</strong>
+                <span style={{ color: C.muted, marginLeft: 8, fontSize: 11 }}>
+                  (from: {a.gen.desc})
+                </span>
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+    </RevealBtn>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// STRING DIAGRAM RENDERER  (Defs 3.3.1–3.3.6)
+//
+// Visual encoding per the thesis:
+//   * colour  = blue, ! colour = red  (Def 3.3.1)
+//   push (f_*, f_!)  = arrowhead pointing DOWN
+//   pull (f^*, f^!)  = arrowhead pointing UP
+//   Crossing          = smooth X, strand on left passes in front (Def 3.3.6)
+//   Colour change dot = filled circle on strand at that height (Def 3.3.4)
+//   Counit (cup)      = two strands arch together and vanish (Def 3.3.2)
+//   Unit   (cap)      = two strands born from a point and spread (Def 3.3.2)
+//   Read bottom → top; domain at bottom, codomain at top.
+// ═══════════════════════════════════════════════════════════════════════════
+
+const SD_PITCH   = 46;   // horizontal spacing between strand centres (px)
+const SD_LAYER   = 60;   // vertical height per generator layer (px)
+const SD_PAD_H   = 28;   // left/right padding inside SVG
+const SD_PAD_BOT = 38;   // space for domain strand-end dots
+const SD_PAD_TOP = 16;   // space above codomain strand-end dots
+
+function sdColor(vtype) {
+  return (vtype === "ps" || vtype === "pu") ? C.blue : C.red;
+}
+
+// Build the evolving strand state for each layer boundary.
+// Returns { states: strand[][], gens: generator[] }
+// Each strand: { id, vtype, morph }
+function buildSDLayers(steps) {
+  if (!steps || steps.length < 2) return { states: [], gens: [] };
+  const active = steps[0].seqBefore.map((t, i) => ({ id: `d${i}`, vtype: t.vtype, morph: t.morph }));
+  const states = [active.map(s => ({ ...s }))];
+  const gens   = [];
+  let capN = 0;
+  let cur  = active;
+
+  for (const step of steps.slice(0, -1)) {
+    const gen = step.generator;
+    if (!gen) continue;
+    gens.push(gen);
+    let next = cur.map(s => ({ ...s }));
+    const p  = gen.pos ?? 0;
+
+    if (gen.kind === "counit") {
+      if (p >= 0 && p + 1 < next.length) next.splice(p, 2);
+    } else if (gen.kind === "unit") {
+      const ins = gen.inserted || [];
+      const pp  = Math.min(Math.max(p, 0), next.length);
+      next.splice(pp, 0,
+        { id: `cap${capN}a`, vtype: ins[0]?.vtype ?? "ps", morph: ins[0]?.morph ?? "?" },
+        { id: `cap${capN}b`, vtype: ins[1]?.vtype ?? "pu", morph: ins[1]?.morph ?? "?" }
+      );
+      capN++;
+    } else if (gen.kind === "crossing") {
+      if (p >= 0 && p + 1 < next.length)
+        [next[p], next[p + 1]] = [next[p + 1], next[p]];
+    } else if (gen.kind === "colour_change") {
+      if (p >= 0 && p < next.length) {
+        const cc = { pl:"ps", ps:"pl", lu:"pu", pu:"lu" };
+        next[p] = { ...next[p], vtype: cc[next[p].vtype] ?? next[p].vtype };
+      }
+    }
+    cur = next;
+    states.push(cur.map(s => ({ ...s })));
+  }
+  return { states, gens };
+}
+
+function ArrowTip({ x, y, up, color }) {
+  const h = 5, w = 3.5;
+  const pts = up
+    ? `${x},${y - h} ${x - w},${y + h * 0.4} ${x + w},${y + h * 0.4}`
+    : `${x},${y + h} ${x - w},${y - h * 0.4} ${x + w},${y - h * 0.4}`;
+  return <polygon points={pts} fill={color} />;
+}
+
+// Inline functor sequence label (same styling as SeqDisplay but smaller)
+function SeqLabel({ tokens }) {
+  if (!tokens || tokens.length === 0)
+    return <span style={{ fontStyle: "italic", color: C.muted, fontSize: 11 }}>Id</span>;
+  return (
+    <span style={{ fontFamily: C.mono, fontSize: 11, lineHeight: 1.3 }}>
+      {tokens.map((t, i) => {
+        const isBlue = t.vtype === "ps" || t.vtype === "pu";
+        const isPush = t.vtype === "ps" || t.vtype === "pl";
+        const sfx    = vtypeSuffix(t.vtype).slice(1);
+        return (
+          <span key={i}>
+            {i > 0 && <span style={{ color: C.muted, fontSize: 9, margin: "0 2px" }}>·</span>}
+            <span style={{ color: isBlue ? C.blue : C.red }}>
+              {t.morph}
+              {isPush
+                ? <sub style={{ fontSize: "0.7em" }}>{sfx}</sub>
+                : <sup style={{ fontSize: "0.7em" }}>{sfx}</sup>}
+            </span>
+          </span>
+        );
+      })}
+    </span>
+  );
+}
+
+// Generator label chip — shows the kind of move between two boundary labels
+function GenLabel({ gen }) {
+  if (!gen) return null;
+  const col = gen.kind === "unit" || gen.kind === "counit" ? C.gold
+            : gen.kind === "colour_change" ? C.orange
+            : C.muted;
+  const sym = gen.label || (gen.kind === "crossing" ? "×" : gen.kind === "counit" ? "ε" : gen.kind === "unit" ? "η" : "c");
+  return (
+    <span style={{
+      display: "inline-flex", alignItems: "center", justifyContent: "center",
+      color: col, fontFamily: C.mono, fontSize: 10,
+      padding: "0 4px", minWidth: 22,
+    }}>
+      {sym}
+    </span>
+  );
+}
+
+function StringDiagram({ steps, label, accent }) {
+  const { states, gens } = buildSDLayers(steps);
+  if (states.length === 0 || gens.length === 0) return null;
+
+  const maxN = Math.max(...states.map(s => s.length), 1);
+  const W    = maxN * SD_PITCH + SD_PAD_H * 2;
+  const H    = gens.length * SD_LAYER + SD_PAD_BOT + SD_PAD_TOP;
+
+  // x centre for strand i in a state of size n, centred in the SVG
+  const xOf = (i, n) => {
+    const span = (n - 1) * SD_PITCH;
+    return (W - span) / 2 + i * SD_PITCH;
+  };
+  // y for boundary above layer li; SVG y increases downward; domain at bottom
+  const yOf = li => SD_PAD_TOP + (gens.length - li) * SD_LAYER;
+
+  const els = [];
+
+  for (let li = 0; li < gens.length; li++) {
+    const gen  = gens[li];
+    const bot  = states[li];
+    const top  = states[li + 1];
+    const yB   = yOf(li);
+    const yT   = yOf(li + 1);
+    const yM   = (yB + yT) / 2;
+    const p    = gen.pos ?? 0;
+    const key  = `L${li}`;
+
+    // Boundary line drawn in post-processing pass below — skip inline.
+
+    if (gen.kind === "crossing") {
+      bot.forEach((st, i) => {
+        if (i === p || i === p + 1) return;
+        const ai   = top.findIndex(s => s.id === st.id);
+        const xb   = xOf(i, bot.length);
+        const xt   = xOf(ai >= 0 ? ai : i, top.length);
+        const col  = sdColor(st.vtype);
+        const isPull = st.vtype === "pu" || st.vtype === "lu";
+        els.push(<line key={`${key}s${i}`} x1={xb} y1={yB} x2={xt} y2={yT} stroke={col} strokeWidth={2} />);
+        els.push(<ArrowTip key={`${key}a${i}`} x={(xb+xt)/2} y={yM} up={isPull} color={col} />);
+      });
+      if (p >= 0 && p + 1 < bot.length) {
+        const sL   = bot[p],     sR   = bot[p + 1];
+        const xL0  = xOf(p, bot.length),     xR0  = xOf(p + 1, bot.length);
+        const xL1  = xOf(p + 1, top.length), xR1  = xOf(p, top.length);
+        const colL = sdColor(sL.vtype),       colR = sdColor(sR.vtype);
+        // R behind, L in front
+        els.push(<path key={`${key}xR`}
+          d={`M${xR0},${yB} C${xR0},${yM} ${xR1},${yM} ${xR1},${yT}`}
+          fill="none" stroke={colR} strokeWidth={2.5} />);
+        els.push(<path key={`${key}xLbg`}
+          d={`M${xL0},${yB} C${xL0},${yM} ${xL1},${yM} ${xL1},${yT}`}
+          fill="none" stroke="white" strokeWidth={7} />);
+        els.push(<path key={`${key}xL`}
+          d={`M${xL0},${yB} C${xL0},${yM} ${xL1},${yM} ${xL1},${yT}`}
+          fill="none" stroke={colL} strokeWidth={2.5} />);
+        const isPullL = sL.vtype === "pu" || sL.vtype === "lu";
+        const isPullR = sR.vtype === "pu" || sR.vtype === "lu";
+        els.push(<ArrowTip key={`${key}xLa`} x={(xL0+xL1)/2} y={yM} up={isPullL} color={colL} />);
+        els.push(<ArrowTip key={`${key}xRa`} x={(xR0+xR1)/2} y={yM} up={isPullR} color={colR} />);
+      }
+
+    } else if (gen.kind === "colour_change") {
+      bot.forEach((st, i) => {
+        const ai   = top.findIndex(s => s.id === st.id);
+        const xb   = xOf(i, bot.length);
+        const xt   = xOf(ai >= 0 ? ai : i, top.length);
+        const col  = sdColor(st.vtype);
+        const xmid = (xb + xt) / 2;
+        els.push(<line key={`${key}sb${i}`} x1={xb} y1={yB} x2={xmid} y2={yM} stroke={col} strokeWidth={2} />);
+        if (i === p) {
+          const colNew = sdColor(top[ai]?.vtype ?? st.vtype);
+          els.push(<circle key={`${key}cd`} cx={xmid} cy={yM} r={5.5}
+            fill={colNew} stroke={col} strokeWidth={1.5} />);
+          els.push(<line key={`${key}st${i}`} x1={xmid} y1={yM} x2={xt} y2={yT}
+            stroke={colNew} strokeWidth={2} />);
+          const isPull = (top[ai]?.vtype) === "pu" || (top[ai]?.vtype) === "lu";
+          els.push(<ArrowTip key={`${key}a${i}`} x={xt} y={yT - 10} up={isPull} color={colNew} />);
+        } else {
+          els.push(<line key={`${key}st${i}`} x1={xmid} y1={yM} x2={xt} y2={yT} stroke={col} strokeWidth={2} />);
+          const isPull = st.vtype === "pu" || st.vtype === "lu";
+          els.push(<ArrowTip key={`${key}a${i}`} x={xmid} y={yM} up={isPull} color={col} />);
+        }
+      });
+
+    } else if (gen.kind === "counit") {
+      bot.forEach((st, i) => {
+        if (i === p || i === p + 1) return;
+        const ai   = top.findIndex(s => s.id === st.id);
+        const xb   = xOf(i, bot.length);
+        const xt   = xOf(ai >= 0 ? ai : (i > p + 1 ? i - 2 : i), top.length);
+        const col  = sdColor(st.vtype);
+        const isPull = st.vtype === "pu" || st.vtype === "lu";
+        els.push(<line key={`${key}s${i}`} x1={xb} y1={yB} x2={xt} y2={yT} stroke={col} strokeWidth={2} />);
+        els.push(<ArrowTip key={`${key}a${i}`} x={(xb+xt)/2} y={yM} up={isPull} color={col} />);
+      });
+      if (p >= 0 && p + 1 < bot.length) {
+        const stA  = bot[p], stB = bot[p + 1];
+        const xA   = xOf(p, bot.length), xB = xOf(p + 1, bot.length);
+        const mx   = (xA + xB) / 2;
+        const col  = sdColor(stA.vtype);
+        const isPull = stA.vtype === "pu" || stA.vtype === "lu";
+        els.push(<path key={`${key}cup`}
+          d={`M${xA},${yB} C${xA},${yT} ${mx},${yT} ${mx},${yT} C${mx},${yT} ${xB},${yT} ${xB},${yB}`}
+          fill="none" stroke={col} strokeWidth={2} />);
+        els.push(<ArrowTip key={`${key}cupAL`} x={xA + (mx-xA)*0.4} y={yB + (yM-yB)*0.4} up={isPull} color={col} />);
+        els.push(<ArrowTip key={`${key}cupAR`} x={xB + (mx-xB)*0.4} y={yB + (yM-yB)*0.4} up={isPull} color={col} />);
+      }
+
+    } else if (gen.kind === "unit") {
+      const pp = Math.min(Math.max(p, 0), top.length - 2);
+      top.forEach((st, i) => {
+        if (st.id.startsWith("cap")) return;
+        const bi   = bot.findIndex(s => s.id === st.id);
+        if (bi < 0) return;
+        const xb   = xOf(bi, bot.length);
+        const xt   = xOf(i, top.length);
+        const col  = sdColor(st.vtype);
+        const isPull = st.vtype === "pu" || st.vtype === "lu";
+        els.push(<line key={`${key}s${i}`} x1={xb} y1={yB} x2={xt} y2={yT} stroke={col} strokeWidth={2} />);
+        els.push(<ArrowTip key={`${key}a${i}`} x={(xb+xt)/2} y={yM} up={isPull} color={col} />);
+      });
+      const insA = top[pp], insB = top[pp + 1];
+      if (insA && insB && insA.id.startsWith("cap")) {
+        const xA   = xOf(pp, top.length), xB = xOf(pp + 1, top.length);
+        const mx   = (xA + xB) / 2;
+        const col  = sdColor(insA.vtype);
+        const isPull = insA.vtype === "pu" || insA.vtype === "lu";
+        els.push(<path key={`${key}cap`}
+          d={`M${xA},${yT} C${xA},${yB} ${mx},${yB} ${mx},${yB} C${mx},${yB} ${xB},${yB} ${xB},${yT}`}
+          fill="none" stroke={col} strokeWidth={2} />);
+        els.push(<ArrowTip key={`${key}capAL`} x={mx+(xA-mx)*0.55} y={yB+(yT-yB)*0.55} up={isPull} color={col} />);
+        els.push(<ArrowTip key={`${key}capAR`} x={mx+(xB-mx)*0.55} y={yB+(yT-yB)*0.55} up={isPull} color={col} />);
+      }
+
+    } else {
+      // identity / fallback
+      bot.forEach((st, i) => {
+        const ai   = top.findIndex(s => s.id === st.id);
+        const xb   = xOf(i, bot.length);
+        const xt   = xOf(ai >= 0 ? ai : i, top.length);
+        const col  = sdColor(st.vtype);
+        const isPull = st.vtype === "pu" || st.vtype === "lu";
+        els.push(<line key={`${key}s${i}`} x1={xb} y1={yB} x2={xt} y2={yT} stroke={col} strokeWidth={2} />);
+        els.push(<ArrowTip key={`${key}a${i}`} x={(xb+xt)/2} y={yM} up={isPull} color={col} />);
+      });
+    }
+  }
+
+  // ── Boundary lines post-processing pass ───────────────────────────────────
+  // Draw one dashed line per layer boundary (at yOf(0) through yOf(gens.length)).
+  // For counit (cup) layers: the arc meets at yT = yOf(li+1), gap the line there.
+  // For unit (cap) layers: the cap dot sits at yB = yOf(li), gap the line there.
+  // This prevents the boundary lines from intersecting the curved cup/cap strands.
+  for (let li = 0; li <= gens.length; li++) {
+    const y    = yOf(li);
+    const isBotBoundary = li === 0;
+    const isTopBoundary = li === gens.length;
+    const sw   = (isBotBoundary || isTopBoundary) ? 1 : 0.8;
+    const dash = (isBotBoundary || isTopBoundary) ? "4,3" : "3,3";
+
+    // Is there a cup whose arc meets at this boundary? (cup in layer li-1 meets at yOf(li))
+    const cupAbove = li > 0 && gens[li - 1]?.kind === "counit";
+    // Is there a cap whose dot sits at this boundary? (cap in layer li meets at yOf(li))
+    const capBelow = li < gens.length && gens[li]?.kind === "unit";
+
+    if (cupAbove || capBelow) {
+      // Compute the x of the arc midpoint at this boundary
+      let mx, gap;
+      if (cupAbove) {
+        const bot = states[li - 1];
+        const p2  = gens[li - 1].pos ?? 0;
+        if (p2 >= 0 && p2 + 1 < bot.length) {
+          const xA = xOf(p2, bot.length), xB = xOf(p2 + 1, bot.length);
+          mx  = (xA + xB) / 2;
+          gap = (xB - xA) * 0.55;
+        }
+      } else {
+        // capBelow: cap dot is at yOf(li) = yB of that layer
+        const top2 = states[li + 1];
+        const p2   = gens[li].pos ?? 0;
+        const pp   = Math.min(Math.max(p2, 0), top2.length - 2);
+        if (pp >= 0 && pp + 1 < top2.length) {
+          const xA = xOf(pp, top2.length), xB = xOf(pp + 1, top2.length);
+          mx  = (xA + xB) / 2;
+          gap = (xB - xA) * 0.55;
+        }
+      }
+      if (mx !== undefined) {
+        els.push(<line key={`bnd${li}L`} x1={4} y1={y} x2={mx - gap / 2} y2={y}
+            stroke={C.faint} strokeWidth={sw} strokeDasharray={dash} opacity={0.7} />);
+        els.push(<line key={`bnd${li}R`} x1={mx + gap / 2} y1={y} x2={W - 4} y2={y}
+            stroke={C.faint} strokeWidth={sw} strokeDasharray={dash} opacity={0.7} />);
+      } else {
+        els.push(
+          <line key={`bnd${li}`} x1={4} y1={y} x2={W - 4} y2={y}
+            stroke={C.faint} strokeWidth={sw} strokeDasharray={dash} opacity={0.7} />
+        );
+      }
+    } else {
+      els.push(
+        <line key={`bnd${li}`} x1={4} y1={y} x2={W - 4} y2={y}
+          stroke={C.faint} strokeWidth={sw} strokeDasharray={dash} opacity={0.7} />
+      );
+    }
+  }
+
+  // Domain strand-end dots (at the very bottom boundary)
+  states[0].forEach((st, i) => {
+    els.push(<circle key={`dbot${i}`} cx={xOf(i, states[0].length)} cy={yOf(0)} r={3}
+      fill={sdColor(st.vtype)} opacity={0.8} />);
+  });
+  // Codomain strand-end dots (at the very top boundary)
+  states[states.length - 1].forEach((st, i) => {
+    els.push(<circle key={`ctop${i}`} cx={xOf(i, states[states.length-1].length)} cy={yOf(gens.length)} r={3}
+      fill={sdColor(st.vtype)} opacity={0.8} />);
+  });
+
+  // ── Compose SVG + label column side by side ─────────────────────────────
+  // The label column is a separate HTML element to avoid foreignObject.
+  // We need the absolute y positions to align labels with boundaries.
+  // We pass these as data to render the label column.
+
+  // Boundary y positions (in SVG coords): states[0..n], at yOf(0..n)
+  const boundaryYs = states.map((_, li) => yOf(li));  // li=0 = domain, li=n = codomain
+
+  return (
+    <div style={{ display: "flex", alignItems: "flex-start", gap: 0 }}>
+      {/* SVG column */}
+      <svg width={W} height={H} style={{ display: "block", flexShrink: 0, overflow: "visible" }}>
+        {els}
+      </svg>
+
+      {/* Label column: one row per boundary, vertically positioned to match SVG */}
+      <div style={{ position: "relative", height: H, flexShrink: 0, minWidth: 140 }}>
+        {states.map((state, li) => {
+          const yPx  = boundaryYs[li];       // SVG y of this boundary
+          const gen  = li > 0 ? gens[li - 1] : null;  // generator ABOVE this boundary
+          const isTop = li === states.length - 1;
+          const isBot = li === 0;
+
+          return (
+            <div key={li} style={{
+              position: "absolute",
+              // Centre the label on the boundary line
+              top: yPx - 10,
+              left: 10,
+              right: 0,
+              display: "flex",
+              alignItems: "center",
+              gap: 6,
+            }}>
+              {/* Arrow from label up to previous boundary, only for middle labels */}
+              {!isBot && !isTop && (
+                <span style={{ color: C.muted, fontSize: 12 }}>→</span>
+              )}
+              {isBot && (
+                <span style={{ color: C.muted, fontSize: 9, minWidth: 14, textAlign: "center" }}>
+                  {/* domain marker */}
+                </span>
+              )}
+              <span style={{
+                background: isBot || isTop ? C.paper : "transparent",
+                border: isBot || isTop ? `1px solid ${C.faint}` : "none",
+                borderRadius: 4,
+                padding: isBot || isTop ? "2px 6px" : "1px 4px",
+              }}>
+                <SeqLabel tokens={state} />
+              </span>
+              {/* Generator symbol to the right of boundary, pointing to next */}
+              {li < gens.length && (
+                <GenLabel gen={gens[li]} />
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// EXAMPLES PANEL
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Pre-built examples from Chapter 3.  Each example has:
+//   title    — short name
+//   ref      — theorem/example reference
+//   desc     — one-sentence description
+//   alphaRaw — lines for path α (one functor sequence per line)
+//   betaRaw  — lines for path β (empty string = omit β input)
+const EXAMPLES = [
+  {
+    title: "Example 3.3.7",
+    ref: "p. 84",
+    desc: "A five-step natural transformation from f^* f_! j^* to j^!. Illustrates crossings, a colour change, and a counit. (Single path — enter as α only.)",
+    alphaRaw: `f^* f_! j^*\nf^* j^* f_!\nf^* j^! f_!\nj^! f^* f_!\nj^! f^* f_*\nj^!`,
+    betaRaw: "",
+  },
+  {
+    title: "Example 3.3.22",
+    ref: "p. 87",
+    desc: "Coherence problem: two paths from f^* f_* g_! to g_!. Path α uses two crossings then a counit; path β applies the counit directly. Establishes commutativity by Theorem 3.3.13.",
+    alphaRaw: `f^* f_* g_!\nf^* g_! f_*\ng_! f^* f_*\ng_!`,
+    betaRaw: `f^* f_* g_!\ng_!`,
+  },
+  {
+    title: "Example 3.3.23",
+    ref: "pp. 89\u201390",
+    desc: "Localisation of the convolution isomorphism (p. 90\u201391). To encode this in the tool, one first moves all functors onto one side of the Hom groups using the adjunctions g_* \u22a3 g^* and j^* \u22a3 j_*. This converts Hom(g_*j^*, f_!j^*) into sections Hom(Id, j_*g_*f_!j^*) \u2014 diagrammatically, moving the \u03c6-dot below the black line. The coherence problem then becomes two formal paths from f_! g_* (2 strands) to j_* g_* f_! j^* (4 strands). Path \u03b1 applies \u03c4 (colour changes + monocolour crossing) to the inner strands first, then adds the j_*\u2026j^* restriction via a unit and crossings. Path \u03b2 adds the restriction first, then applies \u03c4. Both induce the same matching; Theorem 3.3.13 applies.",
+    alphaRaw: `f_! g_*\nf_! g_!\ng_! f_!\ng_* f_!\nj_* j^* g_* f_!\nj_* g_* j^* f_!\nj_* g_* f_! j^*`,
+    betaRaw: `f_! g_*\nj_* j^* f_! g_*\nj_* f_! j^* g_*\nj_* f_! g_* j^*\nj_* f_! g_! j^*\nj_* g_! f_! j^*\nj_* g_* f_! j^*`,
+  },
+];
+
+function ExamplesPanel({ onLoad }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div style={{ marginBottom: 28 }}>
+      <button
+        onClick={() => setOpen(o => !o)}
+        style={{
+          display: "inline-flex", alignItems: "center", gap: 8,
+          background: open ? C.paper : "#fff",
+          border: `1.5px solid ${C.faint}`,
+          borderRadius: 6, padding: "7px 16px",
+          fontFamily: C.serif, fontSize: 13, fontWeight: 600,
+          color: C.ink, cursor: "pointer",
+          transition: "background 0.15s",
+        }}
+      >
+        <span style={{
+          display: "inline-block", fontSize: 9,
+          transform: open ? "rotate(90deg)" : "none",
+          transition: "transform 0.15s",
+        }}>▶</span>
+        Examples from Chapter 3
+      </button>
+
+      {open && (
+        <div style={{
+          marginTop: 12,
+          background: C.paper,
+          border: `1px solid ${C.faint}`,
+          borderRadius: 8,
+          overflow: "hidden",
+        }}>
+          {EXAMPLES.map((ex, i) => (
+            <div key={i} style={{
+              padding: "14px 18px",
+              borderBottom: i < EXAMPLES.length - 1 ? `1px solid ${C.faint}` : "none",
+              background: ex.unsupported ? "#fdf8f0" : "transparent",
+            }}>
+              <div style={{ display: "flex", alignItems: "baseline", gap: 10, marginBottom: 6 }}>
+                <span style={{ fontFamily: C.serif, fontSize: 13, fontWeight: 700, color: C.ink }}>
+                  {ex.title}
+                </span>
+                <span style={{ fontFamily: C.serif, fontSize: 11, color: C.muted }}>
+                  {ex.ref}
+                </span>
+                {ex.unsupported && (
+                  <span style={{
+                    fontFamily: C.serif, fontSize: 10, color: C.gold,
+                    background: C.goldLt, border: `1px solid ${C.gold}40`,
+                    borderRadius: 10, padding: "1px 8px", letterSpacing: "0.04em",
+                  }}>
+                    outside tool scope
+                  </span>
+                )}
+              </div>
+              <div style={{ fontSize: 12, color: C.muted, fontFamily: C.serif, lineHeight: 1.6, marginBottom: ex.unsupported ? 0 : 10 }}>
+                {ex.desc}
+              </div>
+              {!ex.unsupported && (
+                <div>
+                  <div style={{ display: "flex", gap: 20, flexWrap: "wrap", marginBottom: 10 }}>
+                    <div>
+                      <div style={{ fontSize: 10, fontFamily: C.serif, textTransform: "uppercase", letterSpacing: "0.08em", color: C.muted, marginBottom: 4 }}>Path α</div>
+                      <pre style={{
+                        fontFamily: C.code, fontSize: 11, color: C.blue,
+                        background: C.blueLt, borderRadius: 4,
+                        padding: "6px 10px", margin: 0, lineHeight: 1.7,
+                      }}>{ex.alphaRaw}</pre>
+                    </div>
+                    {ex.betaRaw && (
+                      <div>
+                        <div style={{ fontSize: 10, fontFamily: C.serif, textTransform: "uppercase", letterSpacing: "0.08em", color: C.muted, marginBottom: 4 }}>Path β</div>
+                        <pre style={{
+                          fontFamily: C.code, fontSize: 11, color: C.red,
+                          background: C.redLt, borderRadius: 4,
+                          padding: "6px 10px", margin: 0, lineHeight: 1.7,
+                        }}>{ex.betaRaw}</pre>
+                      </div>
+                    )}
+                  </div>
+                  <button
+                    onClick={() => { onLoad(ex.alphaRaw, ex.betaRaw); setOpen(false); }}
+                    style={{ ...mkBtn(C.ink), fontSize: 11, padding: "4px 14px", letterSpacing: "0.05em" }}
+                  >
+                    Load into tool ↗
+                  </button>
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// MAIN APP
+// ═══════════════════════════════════════════════════════════════════════════
+
+function App() {
+  const [stepsA, setStepsA] = useState([]);
+  const [stepsB, setStepsB] = useState([]);
+  const [result, setResult] = useState(null);
+  // editorKey: incrementing this forces PathEditor components to remount with fresh state
+  const [editorKey, setEditorKey] = useState(0);
+  const [initAlpha, setInitAlpha] = useState("");
+  const [initBeta,  setInitBeta]  = useState("");
+
+  const loadExample = (alphaRaw, betaRaw) => {
+    setInitAlpha(alphaRaw);
+    setInitBeta(betaRaw || "");
+    setEditorKey(k => k + 1);
+    setResult(null);
+    // Scroll to the input sections
+    setTimeout(() => {
+      document.getElementById("path-inputs")?.scrollIntoView({ behavior: "smooth", block: "start" });
+    }, 80);
+  };
+
+  const check = () => {
+    if (stepsA.length < 2 || stepsB.length < 2) {
+      setResult({ error: "Each path needs at least two lines (a domain and a codomain sequence)." }); return;
+    }
+    const mA = computePathMatching(stepsA.slice(0, -1).map(s => ({ ...s.generator, seqBefore: s.seqBefore })));
+    const mB = computePathMatching(stepsB.slice(0, -1).map(s => ({ ...s.generator, seqBefore: s.seqBefore })));
+    if (!mA || !mB) {
+      setResult({ error: "Could not compute matching — check that all steps are resolved." }); return;
+    }
+    if (seqKey(stepsA[0].seqBefore) !== seqKey(stepsB[0].seqBefore)) {
+      setResult({ error: "α and β start from different functor sequences." }); return;
+    }
+    if (seqKey(stepsA[stepsA.length - 1].seqBefore) !== seqKey(stepsB[stepsB.length - 1].seqBefore)) {
+      setResult({ error: "α and β end at different functor sequences." }); return;
+    }
+    // Bubble check (Theorem 3.3.13): closed loops disqualify the coherence theorem.
+    // A bubble is a counit consuming two cap-born strands — a closed loop not touching the boundary.
+    const allBubbles = [
+      ...mA.bubbles.map(b => ({ ...b, path: "α" })),
+      ...mB.bubbles.map(b => ({ ...b, path: "β" })),
+    ];
+    if (allBubbles.length > 0) {
+      setResult({ mA, mB, bubbles: allBubbles, ok: false,
+        msg: null, bubbleError: true });
+      return;
+    }
+    const ok = mA.n === mB.n && mA.codN === mB.codN
+      && mA.matching.every((v, i) => v === mB.matching[i]);
+    const msg = ok ? null
+      : mA.n !== mB.n       ? `Domain functor counts differ (α: ${mA.n}, β: ${mB.n})`
+      : mA.codN !== mB.codN ? `Codomain strand counts differ (α: ${mA.codN}, β: ${mB.codN})`
+      : (() => { for (let i = 0; i < mA.matching.length; i++) if (mA.matching[i] !== mB.matching[i]) return `Strand d${i} exits at c${mA.matching[i]} in α but c${mB.matching[i]} in β`; return "Matchings differ"; })();
+    setResult({ mA, mB, bubbles: [], ok, msg, bubbleError: false });
+  };
+
+  const canCheck = stepsA.length >= 2 && stepsB.length >= 2
+    && stepsA.every(s => !s.generator || s.generator.kind)
+    && stepsB.every(s => !s.generator || s.generator.kind)
+    && !stepsA.some(s => s.ambiguous && !s.chosen)
+    && !stepsB.some(s => s.ambiguous && !s.chosen);
+
+  return (
+    <div style={{ minHeight: "100vh", background: C.bg, padding: "26px 22px 40px", maxWidth: 860, margin: "0 auto", fontFamily: C.mono, color: C.ink }}>
+
+      {/* ── Introduction ── */}
+      <div style={{ borderBottom: `2.5px solid ${C.ink}`, paddingBottom: 18, marginBottom: 28 }}>
+        <div style={{ fontFamily: C.serif, fontSize: 24, fontWeight: 700, letterSpacing: "-0.02em", marginBottom: 6 }}>
+          Six Functor Coherence Checker
+        </div>
+        <div style={{ fontSize: 13, color: C.muted, fontFamily: C.serif, lineHeight: 1.7, maxWidth: 680 }}>
+          This tool checks coherence problems in a six functor formalism, following the
+          diagrammatic framework of Hone (2025), Chapter 3. A coherence problem asks
+          whether two natural transformations α and β with the same source and target
+          are equal. Each natural transformation is input as a sequence of functor
+          compositions connected by generating maps (units, counits, base changes,
+          colour changes). The tool infers these generators automatically, computes the
+          boundary matching of each associated string diagram, and verifies equality
+          via Theorem 3.3.13 / Corollary 3.3.17.
+        </div>
+      </div>
+
+      {/* ── Reference cube ── */}
+      <div style={{ marginBottom: 28, display: "flex", gap: 32, flexWrap: "wrap", alignItems: "flex-start" }}>
+        {/* Cube SVG */}
+        <div style={{ flexShrink: 0 }}>
+          <div style={{ fontSize: 10, fontFamily: C.serif, textTransform: "uppercase", letterSpacing: "0.1em", color: C.muted, marginBottom: 10 }}>
+            Reference pullback cube (p. 78)
+          </div>
+          <svg width={220} height={210} style={{ display: "block", overflow: "visible" }}>
+            {(() => {
+              const dx = 60, dy = 36;
+              const fw = 100, fh = 88;
+              const ox = 22, oy = 62;
+
+              // Front face corners (SVG y increases downward)
+              // Layout: fBL=X, fBR=X', fTL=Y, fTR=Y' (bottom = source spaces, top = target)
+              const fBL = [ox,        oy + fh];  // X
+              const fBR = [ox + fw,   oy + fh];  // X'
+              const fTL = [ox,        oy];        // Y
+              const fTR = [ox + fw,   oy];        // Y'
+              // Back face (depth offset)
+              const bBL = [ox+dx,      oy+fh-dy]; // X^
+              const bBR = [ox+fw+dx,   oy+fh-dy]; // X~
+              const bTL = [ox+dx,      oy-dy];     // Y^
+              const bTR = [ox+fw+dx,   oy-dy];     // Y~
+
+              // Arrow: draw a line from (x1,y1) to (x2,y2) with an arrowhead at the target end
+              const arrowHead = (x1, y1, x2, y2, col="#1b1a17", sw=1.3) => {
+                const angle = Math.atan2(y2 - y1, x2 - x1);
+                const hs = 6; // arrowhead size
+                const ax = x2 - hs * Math.cos(angle);
+                const ay = y2 - hs * Math.sin(angle);
+                const lx = ax + (hs*0.45) * Math.cos(angle + Math.PI/2);
+                const ly = ay + (hs*0.45) * Math.sin(angle + Math.PI/2);
+                const rx = ax + (hs*0.45) * Math.cos(angle - Math.PI/2);
+                const ry = ay + (hs*0.45) * Math.sin(angle - Math.PI/2);
+                return (
+                  <g>
+                    <line x1={x1} y1={y1} x2={ax} y2={ay} stroke={col} strokeWidth={sw} />
+                    <polygon points={`${x2},${y2} ${lx},${ly} ${rx},${ry}`} fill={col} />
+                  </g>
+                );
+              };
+
+              const lbl = (x, y, text, dx2, dy2) => (
+                <text x={x+dx2} y={y+dy2} textAnchor="middle"
+                  fontSize={10} fontFamily="'STIX Two Text', serif"
+                  fontStyle="italic" fill="#1b1a17">
+                  {text}
+                </text>
+              );
+
+              const nodeR = 2.8;
+              const col = "#1b1a17";
+
+              // Arrow directions: source → target
+              // Vertical edges: bottom → top (X→Y, X'→Y', X^→Y^, X~→Y~)  [the j,j',j^,j~ maps]
+              // Horizontal edges: right → left (X'→X, Y'→Y, X~→X^, Y~→Y^) [the g,g~,g^,g' maps]
+              // Depth edges: back → front (X^→X, X~→X', Y^→Y, Y~→Y')      [the f,f~,f^,f' maps]
+
+              return (
+                <g>
+                  {/* All 12 edges with arrowheads, all solid */}
+
+                  {/* Front face */}
+                  {/* g:  X' → X  (bottom, right→left) */}
+                  {arrowHead(fBR[0], fBR[1], fBL[0], fBL[1], col)}
+                  {/* g~: Y' → Y  (top, right→left) */}
+                  {arrowHead(fTR[0], fTR[1], fTL[0], fTL[1], col)}
+                  {/* j:  X  → Y  (left, bottom→top) */}
+                  {arrowHead(fBL[0], fBL[1], fTL[0], fTL[1], col)}
+                  {/* j~: X' → Y' (right, bottom→top) */}
+                  {arrowHead(fBR[0], fBR[1], fTR[0], fTR[1], col)}
+
+                  {/* Back face */}
+                  {/* g^: X~ → X^ (bottom, right→left) */}
+                  {arrowHead(bBR[0], bBR[1], bBL[0], bBL[1], col)}
+                  {/* f^: Y~ → Y^ (top, right→left) */}
+                  {arrowHead(bTR[0], bTR[1], bTL[0], bTL[1], col)}
+                  {/* j^: X^ → Y^ (left, bottom→top) */}
+                  {arrowHead(bBL[0], bBL[1], bTL[0], bTL[1], col)}
+                  {/* j': X~ → Y~ (right, bottom→top) */}
+                  {arrowHead(bBR[0], bBR[1], bTR[0], bTR[1], col)}
+
+                  {/* Depth edges: back → front */}
+                  {/* f:  X^ → X  */}
+                  {arrowHead(bBL[0], bBL[1], fBL[0], fBL[1], col)}
+                  {/* f~: X~ → X' */}
+                  {arrowHead(bBR[0], bBR[1], fBR[0], fBR[1], col)}
+                  {/* g^: Y^ → Y  */}
+                  {arrowHead(bTL[0], bTL[1], fTL[0], fTL[1], col)}
+                  {/* g~: Y~ → Y' */}
+                  {arrowHead(bTR[0], bTR[1], fTR[0], fTR[1], col)}
+
+                  {/* Nodes */}
+                  {[fBL, fBR, fTL, fTR, bBL, bBR, bTL, bTR].map(([x,y], i) => (
+                    <circle key={i} cx={x} cy={y} r={nodeR} fill={col} />
+                  ))}
+
+                  {/* Space labels */}
+                  {lbl(...fBL, "X",   -11,  12)}
+                  {lbl(...fBR, "X′",   11,  12)}
+                  {lbl(...fTL, "Y",   -11,  -6)}
+                  {lbl(...fTR, "Y′",   11,  -6)}
+                  {lbl(...bBL, "X̂",   -9,   12)}
+                  {lbl(...bBR, "X̃",    9,   12)}
+                  {lbl(...bTL, "Ŷ",   -9,   -6)}
+                  {lbl(...bTR, "Ỹ",    9,   -6)}
+
+                  {/* Morphism labels on edges */}
+                  {/* Front face */}
+                  {lbl((fBL[0]+fBR[0])/2, (fBL[1]+fBR[1])/2, "g",   0,  14)}
+                  {lbl((fTL[0]+fTR[0])/2, (fTL[1]+fTR[1])/2, "g̃",   0,  -7)}
+                  {lbl((fBL[0]+fTL[0])/2, (fBL[1]+fTL[1])/2, "j",   -9,   0)}
+                  {lbl((fBR[0]+fTR[0])/2, (fBR[1]+fTR[1])/2, "j̃",    9,   0)}
+                  {/* Back face */}
+                  {lbl((bBL[0]+bBR[0])/2, (bBL[1]+bBR[1])/2, "ĝ",   0,  14)}
+                  {lbl((bTL[0]+bTR[0])/2, (bTL[1]+bTR[1])/2, "f̂",   0,  -7)}
+                  {lbl((bBL[0]+bTL[0])/2, (bBL[1]+bTL[1])/2, "ĵ",  -9,   0)}
+                  {lbl((bBR[0]+bTR[0])/2, (bBR[1]+bTR[1])/2, "j′",   9,   0)}
+                  {/* Depth edges */}
+                  {lbl((fBL[0]+bBL[0])/2, (fBL[1]+bBL[1])/2, "f",   -7,   8)}
+                  {lbl((fBR[0]+bBR[0])/2, (fBR[1]+bBR[1])/2, "f̃",    7,   8)}
+                  {lbl((fTL[0]+bTL[0])/2, (fTL[1]+bTL[1])/2, "ĝ",   -7,  -4)}
+                  {lbl((fTR[0]+bTR[0])/2, (fTR[1]+bTR[1])/2, "g̃",    7,  -4)}
+                </g>
+              );
+            })()}
+          </svg>
+          <div style={{ fontSize: 10, color: C.muted, fontFamily: C.serif, marginTop: 6, maxWidth: 210 }}>
+            All squares are pullbacks. <em>f</em>, <em>g</em> proper; <em>j</em> an open immersion. Decorations on <em>f̃</em>, <em>g̃</em>, <em>ĵ</em>, etc. are dropped when no confusion arises.
+          </div>
+        </div>
+
+        {/* Explanation text */}
+        <div style={{ flex: 1, minWidth: 220 }}>
+          <div style={{ fontSize: 10, fontFamily: C.serif, textTransform: "uppercase", letterSpacing: "0.1em", color: C.muted, marginBottom: 10 }}>
+            Notation and conventions
+          </div>
+          <div style={{ fontSize: 12.5, color: C.ink, fontFamily: C.serif, lineHeight: 1.8 }}>
+            <p style={{ marginBottom: 10 }}>
+              We work within the reference pullback cube shown, following §3.3 of Hone (2025).
+              The morphisms <em>f</em>, <em>g</em> and their decorations are proper;
+              <em> j</em> and its decorations are open immersions.
+              By base change these properties propagate to all decorated variants.
+            </p>
+            <p style={{ marginBottom: 10 }}>
+              When no confusion arises, we write <em>f</em> for any of <em>f</em>, <em>f̃</em>, <em>f̂</em>, <em>f′</em>,
+              and similarly for <em>g</em> and <em>j</em>. All morphisms in the input
+              should be named explicitly (e.g. <code style={{ fontFamily: C.code, fontSize: 11 }}>f~_*</code>,&thinsp;
+              <code style={{ fontFamily: C.code, fontSize: 11 }}>g^!</code>), and the
+              tool tracks them separately.
+            </p>
+            <p style={{ marginBottom: 0 }}>
+              Each functor is written as a morphism name followed by its type:
+              &thinsp;<code style={{ fontFamily: C.code, fontSize: 11, color: C.blue }}>f_*</code>&thinsp;(push ∗),&thinsp;
+              <code style={{ fontFamily: C.code, fontSize: 11, color: C.red }}>f_!</code>&thinsp;(push !),&thinsp;
+              <code style={{ fontFamily: C.code, fontSize: 11, color: C.blue }}>f^*</code>&thinsp;(pull ∗),&thinsp;
+              <code style={{ fontFamily: C.code, fontSize: 11, color: C.red }}>f^!</code>&thinsp;(pull !).
+              Generators between consecutive lines are inferred from Defs 3.3.2, 3.3.4, 3.3.6;
+              ambiguous steps prompt a choice.
+            </p>
+          </div>
+
+          {/* Valid generators compact table */}
+          <div style={{ marginTop: 14, background: C.paper, border: `1px solid ${C.faint}`, borderRadius: 6, padding: "10px 12px" }}>
+            <div style={{ fontSize: 10, fontFamily: C.serif, textTransform: "uppercase", letterSpacing: "0.1em", color: C.muted, marginBottom: 8 }}>
+              Valid generators (Defs 3.3.2, 3.3.4, 3.3.6)
+            </div>
+            {[
+              ["Counits",        "f^* f_* → Id,  f_! f^! → Id"],
+              ["Units",          "Id → f_* f^*,  Id → f^! f_!"],
+              ["Colour changes", "f_! → f_* (always);  f_* → f_! (f proper);  f^! ↔ f^* (j open imm.)"],
+              ["Crossings",      "Adjacent swap — base change or composition isomorphism"],
+            ].map(([name, desc]) => (
+              <div key={name} style={{ display: "flex", gap: 8, marginBottom: 5, alignItems: "baseline" }}>
+                <span style={{ fontSize: 11, fontFamily: C.serif, fontWeight: 600, color: C.ink, minWidth: 100, flexShrink: 0 }}>{name}</span>
+                <span style={{ fontSize: 11, fontFamily: C.mono, color: C.muted }}>{desc}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {/* Examples */}
+      <ExamplesPanel onLoad={loadExample} />
+
+      {/* Path α */}
+      <div id="path-inputs">
+      <Sec num="1" title="Natural transformation α" accent={C.blue + "60"}>
+        <PathEditor key={"alpha-" + editorKey} onChange={setStepsA} initialText={initAlpha} />
+      </Sec>
+
+      {/* Path β */}
+      <Sec num="2" title="Natural transformation β" accent={C.red + "60"}>
+        <PathEditor key={"beta-" + editorKey} onChange={setStepsB} initialText={initBeta} />
+      </Sec>
+      </div>
+
+      {/* String diagrams */}
+      {(stepsA.length >= 2 || stepsB.length >= 2) && (
+        <Sec num="3" title="String diagrams">
+          <div style={{ fontSize: 12.5, color: C.muted, fontFamily: C.serif, marginBottom: 14, lineHeight: 1.5 }}>
+            Each path as a coloured directed string diagram (Defs 3.3.1–3.3.6). Functor sequences label each boundary between layers. Blue = *, red = !. Arrowhead up = pull, down = push. Read bottom to top.
+          </div>
+          <div style={{ display: "flex", gap: 24, flexWrap: "wrap", alignItems: "flex-start" }}>
+            {stepsA.length >= 2 && (
+              <div style={{ background: C.paper, border: "1px solid " + C.faint, borderRadius: 8, padding: "14px 16px" }}>
+                <div style={{ fontFamily: C.serif, fontSize: 13, fontWeight: 700, fontStyle: "italic", color: C.blue, marginBottom: 10 }}>α</div>
+                <StringDiagram steps={stepsA} accent={C.blue} />
+              </div>
+            )}
+            {stepsB.length >= 2 && (
+              <div style={{ background: C.paper, border: "1px solid " + C.faint, borderRadius: 8, padding: "14px 16px" }}>
+                <div style={{ fontFamily: C.serif, fontSize: 13, fontWeight: 700, fontStyle: "italic", color: C.red, marginBottom: 10 }}>β</div>
+                <StringDiagram steps={stepsB} accent={C.red} />
+              </div>
+            )}
+          </div>
+        </Sec>
+      )}
+
+      {/* Check */}
+      <Sec num="4" title="Verify coherence">
+        <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "center" }}>
+          <button onClick={check} disabled={!canCheck}
+            style={{ ...mkBtnLg(canCheck ? C.blue : "#aaa"), opacity: canCheck ? 1 : 0.6 }}>
+            Check matching
+          </button>
+        </div>
+
+        {/* Assumptions panel — always shown once there's input */}
+        {(stepsA.length > 0 || stepsB.length > 0) && (
+          <AssumptionsPanel stepsA={stepsA} stepsB={stepsB} />
+        )}
+
+        {result?.error && (
+          <div style={{ marginTop: 12, color: C.red, fontFamily: C.serif, fontSize: 13 }}>✗ {result.error}</div>
+        )}
+
+        {result && !result.error && (
+          <div style={{ marginTop: 18 }}>
+            {/* Bubble error — blocks the theorem, shown before the matching */}
+            {result.bubbleError && (
+              <div style={{ padding: "13px 17px", borderRadius: 6, border: `2px solid ${C.orange}`, background: C.orangeLt, marginBottom: 16 }}>
+                <div style={{ fontFamily: C.serif, fontSize: 16, fontWeight: 700, color: C.orange, marginBottom: 6 }}>
+                  ⊗  Bubble detected — Theorem 3.3.13 does not apply
+                </div>
+                <div style={{ fontSize: 12.5, color: C.muted, lineHeight: 1.6, fontFamily: C.serif, marginBottom: 10 }}>
+                  A <strong>bubble</strong> (Definition 3.3.12) is a closed loop in the string diagram — a counit
+                  consuming two strands that were born from a unit, never reaching the domain or codomain boundary.
+                  Theorem 3.3.13 requires the string diagrams to have <em>no bubbles</em>; commutativity cannot be
+                  concluded by matching alone.
+                </div>
+                {result.bubbles.map((b, i) => (
+                  <div key={i} style={{ fontSize: 12, fontFamily: C.mono, color: C.orange, marginBottom: 3 }}>
+                    · Bubble in {b.path}: counit closes loop on strands born by a prior unit (step {b.stepIndex + 1})
+                  </div>
+                ))}
+              </div>
+            )}
+            {/* Matching diagrams — always shown so the user can inspect */}
+            <div style={{ display: "flex", gap: 20, flexWrap: "wrap", background: C.paper, border: `1px solid ${C.faint}`, borderRadius: 6, padding: "14px 18px", marginBottom: 16 }}>
+              <MatchingDiagram match={result.mA} color={C.blue} label="Matching of α" />
+              <MatchingDiagram match={result.mB} color={C.red} label="Matching of β" />
+            </div>
+            {!result.bubbleError && (
+              <div style={{ padding: "13px 17px", borderRadius: 6, border: `2px solid ${result.ok ? "#15803d" : "#b91c1c"}`, background: result.ok ? C.greenLt : C.redLt }}>
+                <div style={{ fontFamily: C.serif, fontSize: 16, fontWeight: 700, color: result.ok ? C.green : C.red, marginBottom: 5 }}>
+                  {result.ok ? "✓  Coherence holds — α = β" : "✗  Matchings differ"}
+                </div>
+                <div style={{ fontSize: 12.5, color: C.muted, lineHeight: 1.55, fontFamily: C.serif }}>
+                  {result.ok
+                    ? "The two paths induce identical boundary matchings. By Corollary 3.3.17 (no units/counits) or Theorem 3.3.13 (admissible), α = β and the diagram commutes."
+                    : result.msg}
+                </div>
+                <div style={{ marginTop: 8, fontSize: 11, fontFamily: C.code, color: C.muted }}>
+                  α: [{result.mA.matching.map((c, d) => c >= 0 ? `d${d}↦c${c}` : `d${d}↦⌣`).join("  ")}]
+                  {"  "}β: [{result.mB.matching.map((c, d) => c >= 0 ? `d${d}↦c${c}` : `d${d}↦⌣`).join("  ")}]
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+      </Sec>
+
+      {result?.ok && (
+        <Sec num="5" title="TikZ proof skeleton">
+          <div style={{ fontSize: 12.5, color: C.muted, fontFamily: C.serif, marginBottom: 10, lineHeight: 1.5 }}>
+            Unit/counit steps preserved as intermediate nodes; crossings and colour changes compressed. Requires <code style={{ fontFamily: C.code, fontSize: 11 }}>tikz-cd</code>.
+          </div>
+          <CopyBox text={buildFullTikZ(stepsA, stepsB)} />
+        </Sec>
+      )}
+    </div>
+  );
+}
+
+
+    const domNode = document.getElementById('root');
+    const root = ReactDOM.createRoot(domNode);
+    root.render(React.createElement(App));
+  </script>
+</body>
+</html>
