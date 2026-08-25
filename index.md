@@ -6,8 +6,8 @@ To contact me, please use christopher(dot)t(dot)hone(at)gmail(dot)com.
 
 Papers:
 
-1. [Torsion primes for spaces of commuting elements in Lie groups](https://arxiv.org/abs/2608.21191), joint with Simon Gritschacher.
-2. [Real algebraic varieties and their intersection cohomology](https://arxiv.org/abs/2606.09149)
+1. [Torsion primes for spaces of commuting elements in Lie groups](https://arxiv.org/abs/2608.21191)(2026), joint with Simon Gritschacher.
+2. [Real algebraic varieties and their intersection cohomology](https://arxiv.org/abs/2606.09149)(2026)
 3. [The geometry of tilting composition series via Richardson varieties](https://arxiv.org/abs/2601.16937)(2026), joint with Joe Baine.
 4. [Semisimplifying categorical Heisenberg actions and periodic equivalences](https://arxiv.org/abs/2509.07377)(2025), joint with Finn Klein, Bregje Pauwels, Alexander Sherman, Oded Yacobi, Victor L. Zhang.
 5. [Geometric extensions](https://arxiv.org/abs/2309.11780)(2025), joint with Geordie Williamson.
